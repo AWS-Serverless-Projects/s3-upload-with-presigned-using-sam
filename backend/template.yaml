@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  presigned-with-sam
+
+  Sample SAM Template for presigned-with-sam
+
+Parameters:
+  SnsNotificationEmail:
+    Type: String
+  PresignedUrlExpirySeconds:
+    Type: Number
+    Default: 300
+  Stage:
+    Type: String
+    Default: 'dev'
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - "PUT"
+              - "GET"
+            AllowedHeaders:
+              - "X-Forwarded-For"
+            AllowedOrigins:
+              - !GetAtt S3WebSiteBucket.WebsiteURL
+            MaxAge: 60
+
+  S3WebSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+  
+  S3WebSiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: S3WebSiteBucketPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref S3WebSiteBucket
+                - /*
+      Bucket: !Ref S3WebSiteBucket
+
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: 
+        Ref: Stage
+      Cors:
+        AllowMethods: "'OPTIONS,POST,GET'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+
+  GenerateUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/generate_presigned_url/
+      Handler: app.index
+      Runtime: python3.8
+      Environment:
+        Variables:
+          S3BUCKET: 
+            Ref: S3Bucket
+          EXPIRY_TIME: 
+            Ref: PresignedUrlExpirySeconds
+      Policies:
+        - S3WritePolicy:
+            BucketName:
+              Ref: S3Bucket
+      Events:
+        GenerateUrlApi:
+          Type: Api
+          Properties:
+            Path: /generate
+            Method: get
+            RestApiId:
+              Ref: ApiGatewayApi
+  
+  FileUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/file_uploaded/
+      Handler: app.index
+      Runtime: python3.8
+      Events:
+        S3FileUpload:
+          Type: S3
+          Properties:
+            Bucket:
+              Ref: S3Bucket
+            Events: s3:ObjectCreated:*
+      EventInvokeConfig:
+        DestinationConfig:
+          OnSuccess:
+            Type: SNS
+          OnFailure:
+            Type: SNS
+        MaximumEventAgeInSeconds: 3600
+        MaximumRetryAttempts: 0
+
+  FileUploadNotificationSuccess:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn:
+        Ref: FileUploadFunctionEventInvokeConfigOnSuccessTopic
+      Protocol: email
+      Endpoint: 
+        Ref: SnsNotificationEmail
+  
+  FileUploadNotificationFailure:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn:
+        Ref: FileUploadFunctionEventInvokeConfigOnFailureTopic
+      Protocol: email
+      Endpoint: 
+        Ref: SnsNotificationEmail
+
+Outputs:
+  PresignedUrlApi:
+    Description: "API Gateway endpoint for generate presigned url"
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/generate"
+  GenerateUrlFunction:
+    Description: "GenerateUrlFunction Function ARN"
+    Value: !GetAtt GenerateUrlFunction.Arn
+  GenerateUrlFunctionIamRole:
+    Description: "Implicit IAM Role created for GenerateUrlFunction function"
+    Value: !GetAtt GenerateUrlFunctionRole.Arn
+  FileUploadedFunction:
+    Description: "FileUploadFunction Function ARN"
+    Value: !GetAtt FileUploadFunction.Arn
+  FileUploadFunctionIamRole:
+    Description: "Implicit IAM Role created for FileUploadFunction function"
+    Value: !GetAtt FileUploadFunctionRole.Arn
+  FileUploadOnSuccessSNS:
+    Description: "File upload success sns"
+    Value: !Ref FileUploadFunctionEventInvokeConfigOnSuccessTopic
+  FileUploadOnFailSNS:
+    Description: "File upload failed sns"
+    Value: !Ref FileUploadFunctionEventInvokeConfigOnFailureTopic
+  S3FileUploadBucket:
+    Description: "S3 Bucket to upload files"
+    Value: !GetAtt S3Bucket.Arn
+  S3WebsiteBucket:
+    Value: !Ref S3WebSiteBucket
+    Description: Website hosted bucket name
+  S3WebsiteURL:
+    Value: !GetAtt S3WebSiteBucket.WebsiteURL
+    Description: URL for website hosted on S3
